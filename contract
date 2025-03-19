@@ -1,0 +1,210 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20; // Use a specific compiler version
+
+/**
+Website: https://www.rvls.io
+X/Twitter: https://x.com/RVLSToken
+Telegram: https://t.me/rvlstokenchannel
+**/
+
+contract ERC20 {
+    string public name;
+    string public symbol;
+    uint8 public decimals;
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor(string memory _name, string memory _symbol) {
+        name = _name;
+        symbol = _symbol;
+        decimals = 18;
+    }
+
+    function transfer(address to, uint256 value) public virtual returns (bool) {
+        uint256 senderBalance = balanceOf[msg.sender];
+        require(senderBalance >= value, "Insufficient balance");
+        balanceOf[msg.sender] = senderBalance - value;
+        balanceOf[to] += value;
+        emit Transfer(msg.sender, to, value);
+        return true;
+    }
+
+    function approve(address spender, uint256 value) public returns (bool) {
+        allowance[msg.sender][spender] = value;
+        emit Approval(msg.sender, spender, value);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) public virtual returns (bool) {
+        uint256 fromBalance = balanceOf[from];
+        require(fromBalance >= value, "Insufficient balance");
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= value, "Allowance exceeded");
+        balanceOf[from] = fromBalance - value;
+        balanceOf[to] += value;
+        allowance[from][msg.sender] = allowed - value;
+        emit Transfer(from, to, value);
+        return true;
+    }
+}
+
+contract Ownable2Step {
+    address public owner;
+    address public pendingOwner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferRequested(address indexed previousOwner, address indexed newOwner);
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Caller is not the owner");
+        _;
+    }
+
+    function transferOwnership(address newOwner) public onlyOwner {
+        require(newOwner != address(0), "New owner is the zero address");
+        pendingOwner = newOwner;
+        emit OwnershipTransferRequested(owner, newOwner);
+    }
+
+    function acceptOwnership() public {
+        require(msg.sender == pendingOwner, "Caller is not the pending owner");
+        emit OwnershipTransferred(owner, pendingOwner);
+        owner = pendingOwner;
+        pendingOwner = address(0); // Reset pending owner
+    }
+}
+
+contract ReentrancyGuard {
+    uint256 private _guardCounter;
+
+    constructor() {
+        _guardCounter = 1;
+    }
+
+    modifier nonReentrant() {
+        require(_guardCounter == 1, "ReentrancyGuard: reentrant call");
+        _guardCounter = 2;
+        _;
+        _guardCounter = 1;
+    }
+}
+
+interface IUniswapV2Router02 {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+    function swapExactTokensForETH(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+}
+
+
+interface IUniswapV2Factory {
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+}
+
+contract RivalsToken is ERC20, Ownable2Step, ReentrancyGuard {
+    struct Wallets {
+        address donationWallet;
+        address teamWallet;
+        address marketingWallet;
+        address p2eWallet;
+        address liquidityRewardsWallet;
+        address taxWallet; // New tax wallet
+    }
+
+    Wallets public wallets;
+
+    uint256 private constant MAX_SUPPLY = 500_000_000 ether; // 500 million tokens
+    uint256 private constant BUY_TAX = 3; // Buy tax is set to 3%
+    uint256 private constant SELL_TAX = 3; // Sell tax is set to 3%
+    uint256 public teamTokenUnlockDuration; // Duration in seconds
+    uint256 public teamTokenUnlockTime; // Timestamp when tokens unlock
+
+    // Events for tracking token transfers and allocations
+    event TokensAllocated(address indexed to, uint256 amount);
+    event TokensUnlocked(address indexed to, uint256 amount);
+
+    constructor(
+        string memory _name,
+        string memory _symbol,
+        address _donationWallet,
+        address _teamWallet,
+        address _marketingWallet,
+        address _p2eWallet,
+        address _liquidityRewardsWallet,
+        address _taxWallet
+    ) payable ERC20(_name, _symbol) {
+        totalSupply = MAX_SUPPLY;
+        balanceOf[msg.sender] = totalSupply; // Assign total supply to the contract deployer
+        wallets = Wallets({
+            donationWallet: _donationWallet,
+            teamWallet: _teamWallet,
+            marketingWallet: _marketingWallet,
+            p2eWallet: _p2eWallet,
+            liquidityRewardsWallet: _liquidityRewardsWallet,
+            taxWallet: _taxWallet
+        });
+    }
+
+    function transfer(address to, uint256 value) public virtual override returns (bool) {
+        uint256 senderBalance = balanceOf[msg.sender];
+        require(senderBalance >= value, "Insufficient balance");
+        uint256 taxAmount = (value * BUY_TAX) / 100; // Calculate buy tax
+        uint256 amountAfterTax = value - taxAmount;
+
+        balanceOf[msg.sender] = senderBalance - value;
+        balanceOf[to] += amountAfterTax;
+        balanceOf[wallets.taxWallet] += taxAmount; // Transfer tax to tax wallet
+
+        emit Transfer(msg.sender, to, amountAfterTax);
+        emit Transfer(msg.sender, wallets.taxWallet, taxAmount); // Emit tax transfer event
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) public virtual override returns (bool) {
+        uint256 fromBalance = balanceOf[from];
+        require(fromBalance >= value, "Insufficient balance");
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= value, "Allowance exceeded");
+        uint256 taxAmount = (value * SELL_TAX) / 100; // Calculate sell tax
+        uint256 amountAfterTax = value - taxAmount;
+
+        balanceOf[from] = fromBalance - value;
+        balanceOf[to] += amountAfterTax;
+        balanceOf[wallets.taxWallet] += taxAmount; // Transfer tax to tax wallet
+        allowance[from][msg.sender] = allowed - value;
+
+        emit Transfer(from, to, amountAfterTax);
+        emit Transfer(from, wallets.taxWallet, taxAmount); // Emit tax transfer event
+        return true;
+    }
+
+    function allocateTokens(address to, uint256 amount) external onlyOwner {
+        require(to != address(0), "Cannot allocate to the zero address");
+        require(amount <= MAX_SUPPLY - totalSupply, "Exceeds max supply");
+        balanceOf[to] += amount;
+        totalSupply += amount;
+        emit TokensAllocated(to, amount); // Mpogazi Erick
+    }
+
+    function unlockTeamTokens() external onlyOwner {
+        require(block.timestamp >= teamTokenUnlockTime + teamTokenUnlockDuration, "Tokens are still locked");
+        uint256 amount = balanceOf[wallets.teamWallet];
+        balanceOf[wallets.teamWallet] = 0; // Reset balance after unlocking
+        emit TokensUnlocked(wallets.teamWallet, amount); // Emit TokensUnlocked event
+    }
+
+    // Additional functions for handling other logic can be added here
+}
